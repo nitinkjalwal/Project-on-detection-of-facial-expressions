@@ -1,0 +1,87 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+from kerastuner.tuners import RandomSearch
+from tensorflow.keras.applications import VGG16
+
+# Step 1: Loading  the FER-2013 dataset
+data = pd.read_csv('fer2013.csv')
+
+# Step 2: Preprocessing the data
+pixels = data['pixels'].tolist()
+X = np.array([np.fromstring(pixel, dtype='int', sep=' ') for pixel in pixels])
+X = X.reshape(-1, 48, 48, 1)
+X = X.astype('float32') / 255.0
+
+emotions = data['emotion']
+y = to_categorical(emotions, num_classes=7)
+
+# Step 3: Split the dataset into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Step 4: Apply Data Augmentation
+data_augmentation = tf.keras.Sequential([
+    layers.experimental.preprocessing.RandomFlip("horizontal"),
+    layers.experimental.preprocessing.RandomRotation(0.1),
+    layers.experimental.preprocessing.RandomZoom(0.1),
+])
+
+# Step 5: Use Pre-trained VGG16 model for transfer learning
+base_model = VGG16(weights='imagenet', include_top=False, input_shape=(48, 48, 3))
+base_model.trainable = False
+
+model = models.Sequential([
+    layers.Input(shape=(48, 48, 1)),
+    layers.Conv2D(3, (3, 3), activation='gray'),  # Convert grayscale images to RGB
+    data_augmentation,
+    base_model,
+    layers.Flatten(),
+    layers.Dense(64, activation='relu'),
+    layers.Dense(7, activation='softmax')
+])
+
+model.compile(optimizer='adam',
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+# Step 6: Define the model-building function for Keras Tuner
+def build_model(hp):
+    model = models.Sequential()
+    model.add(layers.Input(shape=(48, 48, 1)))
+    model.add(layers.Conv2D(hp.Int('conv1_units', min_value=32, max_value=128, step=32),
+                            (3, 3), activation='relu'))
+    model.add(data_augmentation)
+    model.add(base_model)
+    model.add(layers.Flatten())
+    model.add(layers.Dense(hp.Int('dense_units', min_value=32, max_value=128, step=32),
+                           activation='relu'))
+    model.add(layers.Dense(7, activation='softmax'))
+
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+
+    return model
+
+# Step 7: Initialize the Keras Tuner RandomSearch tuner
+tuner = RandomSearch(build_model,
+                     objective='val_accuracy',
+                     max_trials=5,
+                     executions_per_trial=2,
+                     directory='my_dir',
+                     project_name='emotion_recognition')
+
+# Step 8: Search for the best hyperparameters
+tuner.search(X_train, y_train, epochs=10, validation_split=0.1)
+
+# Step 9: Get the best model and retrain it on the full training set
+best_model = tuner.get_best_models(num_models=1)[0]
+best_model.fit(X_train, y_train, epochs=20, validation_split=0.1)
+
+# Step 10: Evaluate the best model on the test set
+loss, accuracy = best_model.evaluate(X_test, y_test)
+print(f"Test accuracy: {accuracy * 100:.2f}%")
